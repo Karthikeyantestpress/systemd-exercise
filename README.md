@@ -168,3 +168,36 @@ sudo rm -r /opt/testpress-worker
 sudo systemctl daemon-reload
 sudo userdel testpress
 ```
+
+## Demonstration questions
+
+Questions 1 to 4 are backed by the results in [experiments.md](experiments.md). Questions 5 and 6 weren't tested, because the app has no child processes and Celery wasn't run.
+
+### 1. What is the difference between SIGTERM and SIGKILL?
+
+SIGTERM is a polite request to stop, and a program can handle it and clean up. SIGKILL can't be caught, so the kernel ends the process immediately. In my tests, SIGTERM with a handler logged a shutdown and exited with `0`. SIGKILL printed `Killed` and exited with `137`, with no shutdown log.
+
+### 2. Why doesn't `nohup` provide the same reliability as systemd?
+
+`nohup` only makes a program ignore the hang-up signal when the terminal closes. Nothing watches the program after that. When I killed a `nohup` process, it stayed dead. systemd supervises the service, so it can restart it after a failure, start it at boot, keep its logs and apply limits.
+
+### 3. What happens when a service crashes repeatedly?
+
+With `Restart=on-failure`, systemd restarts it after each failure, waiting `RestartSec` first. If it starts too many times within the limit, systemd gives up with `Start request repeated too quickly` and marks it `failed`. This service allows 5 starts in 60 seconds. A slower crash loop can stay under that limit, as the 15-second crash did, so `NRestarts` is worth checking too.
+
+### 4. What is the difference between restarting a process and restarting a service?
+
+Restarting a process by hand means killing it and running the command again yourself. That loses the service's settings unless you set them up again, and systemd isn't tracking it. `systemctl restart` makes systemd stop the service gracefully with SIGTERM, then start a new process with the same user, settings, limits and logging.
+
+### 5. What happens to child processes when a systemd service is stopped?
+
+systemd puts a service and its child processes in one cgroup, so it can track all of them, even if they try to detach. By default (`KillMode=control-group`), it sends SIGTERM to all of them. Any still running after `TimeoutStopSec` get SIGKILL.
+
+### 6. How would you make sure a Celery worker finishes its current task before shutting down?
+
+Celery treats SIGTERM as a warm shutdown: it stops taking new tasks and finishes the current ones. The unit file needs two things:
+
+- `TimeoutStopSec` set longer than the longest task, or systemd will use SIGKILL partway through.
+- `KillMode=mixed`, which sends SIGTERM only to the main process, so the worker's child processes aren't interrupted directly.
+
+`app.py` uses the same idea on a small scale: the handler sets a flag, and the program finishes its current loop before exiting.
